@@ -5,7 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 class EditSplitScreen extends StatefulWidget {
   final String groupId;
   final String orderId;
-  final Map<String, dynamic> orderData;
+  final Map<String, dynamic> orderData; 
   final List<String> allMemberIds;
 
   const EditSplitScreen({
@@ -21,94 +21,96 @@ class EditSplitScreen extends StatefulWidget {
 }
 
 class _EditSplitScreenState extends State<EditSplitScreen> {
-  late List<Map<String, dynamic>> _items;
   late String _currentUserUid;
-  bool _isSaving = false;
+  
+  // Tracks which items are currently saving so we can show a loading spinner
+  // and prevent spam-clicking.
+  final Set<int> _processingItems = {}; 
 
   @override
   void initState() {
     super.initState();
     _currentUserUid = FirebaseAuth.instance.currentUser!.uid;
-    
-    // Create a deep copy of items so we can safely edit them locally
-    _items = List<Map<String, dynamic>>.from(
-      (widget.orderData['items'] as List<dynamic>? ?? []).map((item) => Map<String, dynamic>.from(item))
-    );
-
-    // Ensure every item has a 'splitBetween' array.
-    for (var item in _items) {
-      if (!item.containsKey('splitBetween')) {
-        item['splitBetween'] = List<String>.from(widget.allMemberIds);
-      } else {
-        item['splitBetween'] = List<String>.from(item['splitBetween']);
-      }
-    }
   }
 
-  Future<void> _updateSplit() async {
-    setState(() => _isSaving = true);
-    try {
-      final docRef = FirebaseFirestore.instance
-          .collection('groups')
-          .doc(widget.groupId)
-          .collection('orders')
-          .doc(widget.orderId);
+  // Runs instantly when a checkbox is tapped
+  Future<void> _toggleItemSplit(int itemIndex, bool wantsToParticipate) async {
+    setState(() => _processingItems.add(itemIndex));
 
-      // 1. Run a background transaction to safely merge data
-      await FirebaseFirestore.instance.runTransaction((transaction) async {
+    final docRef = FirebaseFirestore.instance
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('orders')
+        .doc(widget.orderId);
+
+    try {
+      // Return a String from the transaction to avoid throwing errors and crashing the stream
+      final result = await FirebaseFirestore.instance.runTransaction<String>((transaction) async {
         final snapshot = await transaction.get(docRef);
-        if (!snapshot.exists) throw Exception("Transaction not found.");
+        if (!snapshot.exists) return "ORDER_NOT_FOUND";
 
         final data = snapshot.data()!;
         List<dynamic> dbItems = data['items'] ?? [];
-        List<Map<String, dynamic>> updatedItems = [];
 
-        // 2. Loop through the live items from the database
-        for (int i = 0; i < dbItems.length; i++) {
-          Map<String, dynamic> dbItem = Map<String, dynamic>.from(dbItems[i]);
-          List<String> dbSplitBetween = List<String>.from(dbItem['splitBetween'] ?? widget.allMemberIds);
+        if (itemIndex >= dbItems.length) return "ITEM_NOT_FOUND";
 
-          // Ensure we don't go out of bounds if items were edited
-          if (i < _items.length) {
-            bool wantsToParticipate = _items[i]['splitBetween'].contains(_currentUserUid);
-            
-            if (wantsToParticipate) {
-              // Add user if they checked the box
-              if (!dbSplitBetween.contains(_currentUserUid)) {
-                dbSplitBetween.add(_currentUserUid);
-              }
-            } else {
-              // Remove user if they unchecked the box
-              if (dbSplitBetween.contains(_currentUserUid)) {
-                if (dbSplitBetween.length <= 1) {
-                  // ATOMIC CHECK: Abort if they are the last person
-                  throw Exception("Cannot remove yourself from '${dbItem['name']}'. At least one person must split an item.");
-                }
-                dbSplitBetween.remove(_currentUserUid);
-              }
-            }
+        // Read the live data for this specific item
+        Map<String, dynamic> dbItem = Map<String, dynamic>.from(dbItems[itemIndex]);
+        List<String> dbSplitBetween = List<String>.from(dbItem['splitBetween'] ?? widget.allMemberIds);
+
+        if (wantsToParticipate) {
+          // Add user safely
+          if (!dbSplitBetween.contains(_currentUserUid)) {
+            dbSplitBetween.add(_currentUserUid);
           }
-          dbItem['splitBetween'] = dbSplitBetween;
-          updatedItems.add(dbItem);
+        } else {
+          // Remove user safely
+          if (dbSplitBetween.contains(_currentUserUid)) {
+            // BACKEND CHECK: Look at the live data.
+            // If they are the last person, abort gracefully by returning a string.
+            if (dbSplitBetween.length <= 1) {
+              return "MIN_ONE_USER"; 
+            }
+            dbSplitBetween.remove(_currentUserUid);
+          }
         }
 
-        // 3. Save the safely merged items back to Firestore
+        // Apply changes
+        dbItem['splitBetween'] = dbSplitBetween;
+        dbItems[itemIndex] = dbItem;
+
+        // Push updates to Firestore
         transaction.update(docRef, {
-          'items': updatedItems,
+          'items': dbItems,
           'updatedBy': _currentUserUid,
           'updatedAt': FieldValue.serverTimestamp(),
         });
+        
+        return "SUCCESS";
       });
 
-      if (mounted) Navigator.pop(context);
+      // Handle the UI based on the transaction result
+      if (mounted) {
+        if (result == "MIN_ONE_USER") {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Someone must pay for this item! You cannot remove yourself.')),
+          );
+        } else if (result != "SUCCESS") {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not update: $result')),
+          );
+        }
+      }
     } catch (e) {
       if (mounted) {
-        // Strip out the "Exception: " text for a cleaner UI popup
-        final errorMsg = e.toString().replaceAll('Exception: ', '');
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(errorMsg)));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Network error: $e')),
+        );
       }
     } finally {
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted) {
+        setState(() => _processingItems.remove(itemIndex));
+      }
     }
   }
 
@@ -121,55 +123,65 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.transparent,
       ),
-      body: ListView.separated(
-        padding: const EdgeInsets.only(bottom: 80, top: 16, left: 16, right: 16),
-        itemCount: _items.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 8),
-        itemBuilder: (context, index) {
-          final item = _items[index];
-          final List<String> splitBetween = item['splitBetween'];
-          final isParticipating = splitBetween.contains(_currentUserUid);
+      // StreamBuilder keeps the list updated in real-time
+      body: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('groups')
+            .doc(widget.groupId)
+            .collection('orders')
+            .doc(widget.orderId)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return Center(child: Text('Error: ${snapshot.error}'));
+          if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator(color: Colors.deepPurple));
+          }
 
-          return Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.grey.shade200),
-            ),
-            child: CheckboxListTile(
-              activeColor: Colors.deepPurple,
-              title: Text(item['name'], style: const TextStyle(fontWeight: FontWeight.w500)),
-              subtitle: Text('₹${item['price']} (Split among ${splitBetween.length})'),
-              value: isParticipating,
-              onChanged: (bool? checked) {
-                setState(() {
-                  if (checked == true) {
-                    if (!splitBetween.contains(_currentUserUid)) splitBetween.add(_currentUserUid);
-                  } else {
-                    // Fast-fail UI validation (the transaction will also double-check this on the backend)
-                    if (splitBetween.length > 1) {
-                      splitBetween.remove(_currentUserUid);
-                    } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Someone must pay for this item!')),
-                      );
+          final data = snapshot.data?.data() as Map<String, dynamic>?;
+          if (data == null) return const Center(child: Text('Bill not found'));
+
+          final items = data['items'] as List<dynamic>? ?? [];
+
+          return ListView.separated(
+            padding: const EdgeInsets.only(bottom: 40, top: 16, left: 16, right: 16),
+            itemCount: items.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (context, index) {
+              final item = items[index] as Map<String, dynamic>;
+              final List<String> splitBetween = List<String>.from(item['splitBetween'] ?? widget.allMemberIds);
+              
+              final isParticipating = splitBetween.contains(_currentUserUid);
+              final isProcessing = _processingItems.contains(index);
+
+              return Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade200),
+                ),
+                child: CheckboxListTile(
+                  activeColor: Colors.deepPurple,
+                  title: Text(item['name'], style: const TextStyle(fontWeight: FontWeight.w500)),
+                  subtitle: Text('₹${item['price']} (Split among ${splitBetween.length})'),
+                  value: isParticipating,
+                  // Toggles the specific item directly when clicked
+                  onChanged: isProcessing ? null : (bool? checked) {
+                    if (checked != null) {
+                      _toggleItemSplit(index, checked);
                     }
-                  }
-                  _items[index]['splitBetween'] = splitBetween;
-                });
-              },
-            ),
+                  },
+                  secondary: isProcessing 
+                      ? const SizedBox(
+                          width: 20, 
+                          height: 20, 
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.deepPurple)
+                        ) 
+                      : null,
+                ),
+              );
+            },
           );
         },
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: Colors.deepPurple,
-        foregroundColor: Colors.white,
-        onPressed: _isSaving ? null : _updateSplit,
-        icon: _isSaving 
-            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-            : const Icon(Icons.check),
-        label: Text(_isSaving ? 'Updating...' : 'Update Split'),
       ),
     );
   }
