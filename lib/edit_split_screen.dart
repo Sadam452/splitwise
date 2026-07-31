@@ -7,6 +7,7 @@ class EditSplitScreen extends StatefulWidget {
   final String orderId;
   final Map<String, dynamic> orderData; 
   final List<String> allMemberIds;
+  final Map<String, dynamic> membersData;
 
   const EditSplitScreen({
     super.key,
@@ -14,6 +15,7 @@ class EditSplitScreen extends StatefulWidget {
     required this.orderId,
     required this.orderData,
     required this.allMemberIds,
+    required this.membersData,
   });
 
   @override
@@ -26,6 +28,15 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
   // Tracks which items are currently saving so we can show a loading spinner
   // and prevent spam-clicking.
   final Set<int> _processingItems = {}; 
+  String _getUserName(String uid) {
+    final userData = widget.membersData[uid];
+    if (userData == null) return 'Unknown';
+    if (userData['firstName'] != null && userData['firstName'].toString().isNotEmpty) {
+      return userData['firstName'];
+    }
+    final email = userData['email']?.toString() ?? 'User';
+    return email.split('@').first;
+  }
 
   @override
   void initState() {
@@ -149,7 +160,7 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
             itemBuilder: (context, index) {
               final item = items[index] as Map<String, dynamic>;
               final List<String> splitBetween = List<String>.from(item['splitBetween'] ?? widget.allMemberIds);
-              
+              final splitNames = splitBetween.map((uid) => _getUserName(uid)).join(', ');
               final isParticipating = splitBetween.contains(_currentUserUid);
               final isProcessing = _processingItems.contains(index);
 
@@ -162,7 +173,8 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
                 child: CheckboxListTile(
                   activeColor: Colors.deepPurple,
                   title: Text(item['name'], style: const TextStyle(fontWeight: FontWeight.w500)),
-                  subtitle: Text('₹${item['price']} (Split among ${splitBetween.length})'),
+                  isThreeLine: true,
+                  subtitle: Text('₹${item['price']}\nSplit among: $splitNames',),
                   value: isParticipating,
                   // Toggles the specific item directly when clicked
                   onChanged: isProcessing ? null : (bool? checked) {

@@ -59,4 +59,4 @@ android/key.properties
 
 # Environment variables
 .env
-.env*
+.env*.firebase/

@@ -330,6 +330,7 @@ class TransactionDetailScreen extends StatelessWidget {
                           orderId: orderId,
                           orderData: freshOrderData,
                           allMemberIds: membersData.keys.toList(),
+                          membersData: membersData,
                         ),
                       ),
                     );
