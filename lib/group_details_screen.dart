@@ -280,15 +280,37 @@ Future<void> _pickImage(ImageSource source) async {
     await _processInvoiceData(bytes, 'image/jpeg');
   }
 
+// Future<void> _pickPdf() async {
+//     // Navigator.pop removed here because we handle it in the button's onTap
+//     final FilePickerResult? result = await FilePicker.pickFiles(
+//       type: FileType.custom,
+//       allowedExtensions: ['pdf'],
+//     );
+//     if (result == null || result.files.single.path == null) return;
+//     final bytes = await File(result.files.single.path!).readAsBytes();
+//     await _processInvoiceData(bytes, 'application/pdf');
+//   }
 Future<void> _pickPdf() async {
-    // Navigator.pop removed here because we handle it in the button's onTap
-    final FilePickerResult? result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['pdf'],
-    );
-    if (result == null || result.files.single.path == null) return;
-    final bytes = await File(result.files.single.path!).readAsBytes();
-    await _processInvoiceData(bytes, 'application/pdf');
+    try {
+      final FilePickerResult? result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+        withData: true, // Tell the picker to fetch the raw bytes directly
+      );
+      
+      if (result == null) return; // User canceled the picker
+
+      // Use the direct bytes if available, fallback to reading the path just in case
+      final bytes = result.files.single.bytes ?? await File(result.files.single.path!).readAsBytes();
+      
+      await _processInvoiceData(bytes, 'application/pdf');
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading PDF: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _processInvoiceData(List<int> bytes, String mimeType) async {
