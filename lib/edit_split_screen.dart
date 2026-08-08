@@ -28,6 +28,7 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
   // Tracks which items are currently saving so we can show a loading spinner
   // and prevent spam-clicking.
   final Set<int> _processingItems = {}; 
+  int _changesMade = 0;
   String _getUserName(String uid) {
     final userData = widget.membersData[uid];
     if (userData == null) return 'Unknown';
@@ -47,6 +48,8 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
   // Runs instantly when a checkbox is tapped
   Future<void> _toggleItemSplit(int itemIndex, bool wantsToParticipate) async {
     setState(() => _processingItems.add(itemIndex));
+    // INCREMENT THE COUNTER WHEN THEY CLICK A CHECKBOX
+    _changesMade++;
 
     final docRef = FirebaseFirestore.instance
         .collection('groups')
@@ -125,9 +128,35 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
     }
   }
 
+  void _logSummaryActivity() {
+    if (_changesMade > 0) {
+      final userName = widget.membersData[_currentUserUid]?['firstName'] ?? 'Someone';
+      
+      FirebaseFirestore.instance
+          .collection('groups')
+          .doc(widget.groupId)
+          .collection('orders')
+          .doc(widget.orderId)
+          .collection('activities')
+          .add({
+        'type': 'system',
+        'text': '$userName updated their split details.',
+        'userId': _currentUserUid,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+   return PopScope(
+    canPop: true,
+    onPopInvoked: (didPop) {
+      if(didPop){
+        _logSummaryActivity();
+      }
+    },
+    child: Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
         title: const Text('Edit My Split', style: TextStyle(fontWeight: FontWeight.w600)),
@@ -195,6 +224,7 @@ class _EditSplitScreenState extends State<EditSplitScreen> {
           );
         },
       ),
+    )
     );
   }
 }

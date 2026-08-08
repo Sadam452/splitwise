@@ -765,6 +765,11 @@ Widget _buildTransactionsTab(Map<String, dynamic> membersData) {
           itemBuilder: (context, index) {
             final orderDoc = orders[index];
             final order = orderDoc.data() as Map<String, dynamic>;
+
+            final List<String> reviewedBy = List<String>.from(order['reviewedBy'] ?? []);
+final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
+final hasReviewed = currentUserUid != null && reviewedBy.contains(currentUserUid);
+
             final date = (order['timestamp'] as Timestamp?)?.toDate();
             final dateString = date != null ? "${date.day}/${date.month}/${date.year}" : "";
 
@@ -846,17 +851,40 @@ Widget _buildTransactionsTab(Map<String, dynamic> membersData) {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                displayTitle,
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                  color: isDeleted ? Colors.grey.shade400 : Colors.black87,
-                                  decoration: isDeleted ? TextDecoration.lineThrough : null,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
+                              // Fetch the reviewed array and check if the current user has seen it
+
+
+// Render the title alongside the indicator
+// Render the title alongside the indicator
+Row(
+  children: [
+    Flexible(
+      child: Text(
+        displayTitle,
+        style: TextStyle(
+          fontWeight: hasReviewed ? FontWeight.w600 : FontWeight.w800, // Bolder if unread
+          fontSize: 16,
+          color: isDeleted ? Colors.grey.shade400 : Colors.black87,
+          decoration: isDeleted ? TextDecoration.lineThrough : null,
+        ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    ),
+    const SizedBox(width: 8),
+    if (!hasReviewed && !isDeleted)
+      Container(
+        width: 8,
+        height: 8,
+        decoration: const BoxDecoration(
+          color: Colors.blue,
+          shape: BoxShape.circle,
+        ),
+      )
+    else if (hasReviewed && !isDeleted)
+      const Icon(Icons.done_all_rounded, size: 16, color: Colors.green)
+  ],
+),
                               const SizedBox(height: 4),
                               Text(
                                 isSettlement ? '$addedByName paid • $dateString' : 'Added by $addedByName • $dateString',
