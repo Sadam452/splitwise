@@ -8,6 +8,7 @@ import 'auth_screen.dart';
 import 'account_screen.dart';
 import 'friends_screen.dart';
 import 'activity_screen.dart';
+import 'friendly_error_widget.dart';
 
 final userGroupsProvider = StreamProvider<List<QueryDocumentSnapshot>>((ref) {
   final authState = ref.watch(authStateProvider);
@@ -279,7 +280,11 @@ class _GroupsScreenState extends ConsumerState<GroupsScreen> {
               return GroupsDashboardBuilder(groups: groups, onCreateGroup: () => _showCreateGroupDialog(context));
             },
             loading: () => Center(child: CircularProgressIndicator(color: _tealAccent)),
-            error: (e, _) => Center(child: Text('Error: $e')),
+            error: (e, stackTrace) => FriendlyErrorWidget(
+          errorMessage: e.toString(),
+          // ref.invalidate forces Riverpod to throw away the broken data and try fetching again
+          onRetry: () => ref.invalidate(userGroupsProvider), 
+        ),
           ),
           
           // Tab 1: Friends
