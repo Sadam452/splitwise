@@ -11,6 +11,9 @@ import 'review_invoice_screen.dart';
 import 'transaction_detail_screen.dart';
 import 'add_manual_bill_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'dart:async';
+import 'package:http/http.dart' as http;
+import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 // Stream for group's orders
 final groupOrdersProvider =
@@ -317,73 +320,155 @@ Future<void> _pickPdf() async {
     if (_isProcessing) return;
     setState(() => _isProcessing = true);
 
-    try {
-      final docSnapshot = await FirebaseFirestore.instance
-          .collection('app_config')
-          .doc('secrets')
-          .get();
-      final apiKey = docSnapshot.data()?['gemini_api_key'];
-      if (apiKey == null) throw Exception("API Key missing");
-
-      final model = GenerativeModel(
-        model: 'gemini-flash-latest',
-        apiKey: apiKey,
-        generationConfig: GenerationConfig(
-          responseMimeType: 'application/json',
-          responseSchema: Schema.object(
-            properties: {
-              'title': Schema.string(),
-              'items': Schema.array(
-                items: Schema.object(
-                  properties: {
-                    'name': Schema.string(),
-                    'quantity': Schema.number(),
-                    'price': Schema.number(),
-                  },
-                  requiredProperties: ['name', 'quantity', 'price'],
-                ),
-              ),
-              'delivery_fee': Schema.number(),
-              'other_fees': Schema.number(),
-              'discount': Schema.number(),
-              'total_amount': Schema.number(),
-            },
-            requiredProperties: ['title', 'items', 'total_amount'],
-          ),
-        ),
-      );
-
-      final prompt = TextPart(
-        "You are a highly accurate receipt parsing assistant. Your task is to extract structured data from the provided Indian grocery invoice. "
+    final promptText = "You are a highly accurate receipt parsing assistant. Your task is to extract structured data from the provided Indian grocery invoice. "
         "1. Generate a short, meaningful 'title' for this order based on the vendor or items (e.g., 'Zepto Weekend Run', 'Instamart Snacks'). "
         "2. Extract all individual ordered items, their quantities, and their total prices. "
         "3. Extract the standard delivery fee and any applied discounts. "
         "4. Look carefully for any additional overhead charges like handling fees, rain fees, surge pricing, platform fees, or small order fees. "
         "Sum all of these miscellaneous charges together into a single 'other_fees' value. "
-        "Do not guess; if a numeric value is not clearly visible, default to 0.",
-      );
+        "Do not guess; if a numeric value is not clearly visible, default to 0. "
+        "Return the output STRICTLY as a valid JSON object matching this schema: "
+        "{ \"title\": \"string\", \"items\": [ { \"name\": \"string\", \"quantity\": 1, \"price\": 0.0 } ], \"delivery_fee\": 0.0, \"other_fees\": 0.0, \"discount\": 0.0, \"total_amount\": 0.0 }";
 
-      // ... (existing AI prompt and generation code) ...
-      final documentPart = DataPart(mimeType, Uint8List.fromList(bytes));
-      final response = await model.generateContent([
-        Content.multi([prompt, documentPart]),
-      ]);
+    try {
+      final docSnapshot = await FirebaseFirestore.instance.collection('app_config').doc('secrets').get();
+      final geminiApiKey = docSnapshot.data()?['gemini_api_key'];
+      final groqApiKey = docSnapshot.data()?['groq_api_key']; 
+      
+      if (geminiApiKey == null || groqApiKey == null) throw Exception("API Keys missing");
 
-      if (response.text != null) {
-        final Map<String, dynamic> receiptData = jsonDecode(response.text!);
+      String? responseText;
+      bool groqAttemptedAndFailed = false;
 
-        // NEW: Fetch member profiles before opening the review screen
-        final groupDoc = await FirebaseFirestore.instance
-            .collection('groups')
-            .doc(widget.groupId)
-            .get();
+      // --- ATTEMPT 1: GROQ (Primary for both Images and PDFs) ---
+      try {
+        List<Map<String, dynamic>> contentList = [];
+        
+        if (mimeType == 'application/pdf') {
+          // DIGITAL PDF: Extract text locally and pass it to Groq as a simple text prompt
+          final PdfDocument document = PdfDocument(inputBytes: bytes);
+          final String extractedText = PdfTextExtractor(document).extractText();
+          document.dispose();
+
+          if (extractedText.trim().isEmpty) {
+             throw Exception("Could not extract text from PDF (it might be a scanned image).");
+          }
+
+          contentList.add({
+            "type": "text", 
+            "text": promptText + "\n\nHere is the extracted invoice text:\n$extractedText\n\nPlease pull out relevant information as a JSON object in JSON format."
+          });
+        } else {
+          // IMAGE: Process using Vision
+          final base64Image = base64Encode(bytes);
+          contentList.add({"type": "text", "text": promptText + "\nPlease pull out relevant information as a JSON object in JSON format."});
+          contentList.add({
+            "type": "image_url",
+            "image_url": {"url": "data:$mimeType;base64,$base64Image"}
+          });
+        }
+        
+        final groqResponse = await http.post(
+          Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+          headers: {
+            'Authorization': 'Bearer $groqApiKey',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            "model": "qwen/qwen3.8-27b", 
+            "messages": [
+              {
+                "role": "user",
+                "content": contentList 
+              }
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1, 
+            "max_tokens": 2048, 
+          }),
+        ).timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => throw TimeoutException('Groq is taking too long.'),
+        );
+        
+        if (groqResponse.statusCode == 200) {
+          final data = jsonDecode(groqResponse.body);
+          responseText = data['choices'][0]['message']['content'];
+        } else {
+          throw Exception("Groq Failed: ${groqResponse.body}");
+        }
+        
+      } catch (groqError) {
+        debugPrint("Groq Failed or Timed Out ($groqError). Falling back to Gemini...");
+        groqAttemptedAndFailed = true;
+      }
+
+      // --- ATTEMPT 2: GEMINI (Fallback) ---
+      if (responseText == null) {
+        
+        if (groqAttemptedAndFailed && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('The parsing is taking longer than usual, please wait as we try again...'),
+              duration: Duration(seconds: 4),
+              backgroundColor: Colors.deepPurple, 
+            ),
+          );
+        }
+
+        final model = GenerativeModel(
+          model: 'gemini-flash-latest',
+          apiKey: geminiApiKey,
+          generationConfig: GenerationConfig(
+            responseMimeType: 'application/json',
+            responseSchema: Schema.object(
+              properties: {
+                'title': Schema.string(),
+                'items': Schema.array(
+                  items: Schema.object(
+                    properties: {
+                      'name': Schema.string(),
+                      'quantity': Schema.number(),
+                      'price': Schema.number(),
+                    },
+                    requiredProperties: ['name', 'quantity', 'price'],
+                  ),
+                ),
+                'delivery_fee': Schema.number(),
+                'other_fees': Schema.number(),
+                'discount': Schema.number(),
+                'total_amount': Schema.number(),
+              },
+              requiredProperties: ['title', 'items', 'total_amount'],
+            ),
+          ),
+        );
+
+        final documentPart = DataPart(mimeType, Uint8List.fromList(bytes));
+        
+        try {
+          final response = await model.generateContent([
+            Content.multi([TextPart(promptText), documentPart]),
+          ]).timeout(
+            const Duration(seconds: 12), 
+            onTimeout: () => throw TimeoutException('Gemini is taking too long.'),
+          );
+          
+          responseText = response.text;
+        } catch (geminiError) {
+          throw Exception("Failed to parse invoice. Please try again later. [Error Code: GeGr-002]");
+        }
+      }
+
+      // --- PARSE AND NAVIGATE ---
+      if (responseText != null) {
+        final Map<String, dynamic> receiptData = jsonDecode(responseText);
+
+        final groupDoc = await FirebaseFirestore.instance.collection('groups').doc(widget.groupId).get();
         final membersList = List<String>.from(groupDoc['members'] ?? []);
         Map<String, dynamic> fetchedMembersData = {};
         for (String uid in membersList) {
-          final userDoc = await FirebaseFirestore.instance
-              .collection('users')
-              .doc(uid)
-              .get();
+          final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
           fetchedMembersData[uid] = userDoc.data() ?? {};
         }
 
@@ -394,62 +479,21 @@ Future<void> _pickPdf() async {
               builder: (context) => ReviewInvoiceScreen(
                 groupId: widget.groupId,
                 parsedData: receiptData,
-                membersData: fetchedMembersData, // Pass the members data here
+                membersData: fetchedMembersData, 
               ),
             ),
           );
         }
       }
     } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString().replaceAll('Exception: ', ''))));
+      }
     } finally {
       if (mounted) setState(() => _isProcessing = false);
     }
   }
-
-  // void _showUploadOptions() {
-  //   showModalBottomSheet(
-  //     context: context,
-  //     shape: const RoundedRectangleBorder(
-  //       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-  //     ),
-  //     builder: (context) => SafeArea(
-  //       child: Padding(
-  //         padding: const EdgeInsets.symmetric(vertical: 20),
-  //         child: Column(
-  //           mainAxisSize: MainAxisSize.min,
-  //           children: [
-  //             const Text(
-  //               'Upload Invoice',
-  //               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-  //             ),
-  //             const SizedBox(height: 16),
-  //             ListTile(
-  //               leading: const CircleAvatar(
-  //                 backgroundColor: Colors.blueAccent,
-  //                 child: Icon(Icons.image, color: Colors.white),
-  //               ),
-  //               title: const Text('Scan Image from Gallery'),
-  //               onTap: _pickImage,
-  //             ),
-  //             ListTile(
-  //               leading: const CircleAvatar(
-  //                 backgroundColor: Colors.redAccent,
-  //                 child: Icon(Icons.picture_as_pdf, color: Colors.white),
-  //               ),
-  //               title: const Text('Upload PDF File'),
-  //               onTap: _pickPdf,
-  //             ),
-  //           ],
-  //         ),
-  //       ),
-  //     ),
-  //   );
-  // }
-
+  
   String _getUserName(String uid, Map<String, dynamic> membersData) {
     final userData = membersData[uid];
     if (userData == null) return 'Unknown';
