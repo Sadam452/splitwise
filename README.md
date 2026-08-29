@@ -1,4 +1,4 @@
-```markdown
+
 # Chanda 💸
 
 Chanda is a modern, cross-platform expense-sharing application built with Flutter and Firebase. Designed to simplify group expense tracking, bill splitting, and debt settlements, Chanda features a clean, high-performance UI and advanced AI-powered receipt scanning.
@@ -42,7 +42,7 @@ Chanda is a modern, cross-platform expense-sharing application built with Flutte
    git clone [https://github.com/Sadam452/splitwise.git](https://github.com/Sadam452/splitwise.git)
    cd splitwise
 
-```
+
 
 2. **Install dependencies:**
 ```bash
